@@ -12,9 +12,9 @@ import asyncio
 API_KEY = os.getenv("DOME_API_KEY", "YOUR_DOME_API_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
-POLL_INTERVAL_MIN = 5
+POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 BASE_URL = "https://api.domeapi.io/v1"
-HEADERS = {"X-API-Key": API_KEY}
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 ESPORTS_KEYWORDS = [
     "esports",
     "dota",
