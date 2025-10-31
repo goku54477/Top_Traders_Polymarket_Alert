@@ -5,6 +5,7 @@ import time
 import logging
 from datetime import datetime
 from telegram import Bot
+from telegram.constants import ParseMode
 from telegram.error import TelegramError
 import asyncio
 
@@ -134,68 +135,7 @@ async def send_telegram_alerts(bot, alerts):
 """.join(batch)
         )
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
-            logging.info(f"Successfully sent a batch of {len(batch)} alerts.")
-        except TelegramError as e:
-            logging.exception(f"Failed to send Telegram message: {e}")
-        except Exception as e:
-            logging.exception(
-                f"An unexpected error occurred during message sending: {e}"
-            )
-
-
-async def job():
-    """The main job to be run on a schedule."""
-    logging.info("Starting new alert cycle...")
-    alerts = analyze_and_prepare_alerts()
-    if alerts:
-        bot = Bot(token=BOT_TOKEN)
-        await send_telegram_alerts(bot, alerts)
-    logging.info(f"Alert cycle finished. Next run in {POLL_INTERVAL_MIN} minutes.")
-
-
-def run_job_sync():
-    """Synchronous wrapper to run the async job."""
-    asyncio.run(job())
-
-
-if __name__ == "__main__":
-    if "YOUR_DOME_API_KEY" in API_KEY or "YOUR_TELEGRAM_BOT_TOKEN" in BOT_TOKEN:
-        logging.error(
-            "Configuration placeholders detected. Please replace them with your actual credentials."
-        )
-    else:
-        logging.info("Starting Esports Odds Alert Bot...")
-        run_job_sync()
-        schedule.every(POLL_INTERVAL_MIN).minutes.do(run_job_sync)
-        logging.info(f"Scheduled to run every {POLL_INTERVAL_MIN} minutes.")
-        try:
-            while True:
-                schedule.run_pending()
-                time.sleep(1)
-        except KeyboardInterrupt as e:
-            logging.exception(f"Shutting down bot...: {e}")
-
-
-async def send_telegram_alerts(bot, alerts):
-    """Sends a batch of alerts to the configured Telegram chat."""
-    if not alerts:
-        logging.info("No new alerts to send.")
-        return
-    for i in range(0, len(alerts), 5):
-        batch = alerts[i : i + 5]
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = f"🎮 **Esports Odds Alert** ({timestamp})\n\n"
-        message = (
-            header
-            + """
-
----
-
-""".join(batch)
-        )
-        try:
-            await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+            await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             logging.info(f"Successfully sent a batch of {len(batch)} alerts.")
         except TelegramError as e:
             logging.exception(f"Failed to send Telegram message: {e}")
