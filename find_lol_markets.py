@@ -3,7 +3,7 @@ import os
 import requests
 import json
 
-API_KEY = "YOUR_DOME_API_KEY"
+API_KEY = os.getenv("DOME_API_KEY", "YOUR_DOME_API_KEY")
 BASE_URL = "https://api.domeapi.io/v1"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 

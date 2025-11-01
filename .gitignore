@@ -2,3 +2,13 @@
 .states/
 __pycache__/
 /app/__pycache__/
+
+# Environment variables and secrets
+.env
+*.env
+.env.local
+.env.*.local
+
+# Test files with credentials (optional - uncomment if you don't want test files tracked)
+# test_*.py
+# find_*.py

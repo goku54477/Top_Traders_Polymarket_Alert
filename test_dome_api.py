@@ -3,8 +3,9 @@ import requests
 import json
 from datetime import datetime
 
-# Your Dome API credentials
-API_KEY = "YOUR_DOME_API_KEY"
+# Get API key from environment variable
+import os
+API_KEY = os.getenv("DOME_API_KEY", "YOUR_DOME_API_KEY")
 BASE_URL = "https://api.domeapi.io/v1"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 

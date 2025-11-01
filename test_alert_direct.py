@@ -6,9 +6,9 @@ import logging
 from telegram import Bot
 from telegram.constants import ParseMode
 
-# Set environment variables
-os.environ["TELEGRAM_BOT_TOKEN"] = "YOUR_TELEGRAM_BOT_TOKEN"
-os.environ["TELEGRAM_CHAT_ID"] = "YOUR_TELEGRAM_CHAT_ID"
+# Get environment variables (set these in your environment or .env file)
+# Do NOT hardcode credentials here - they will be exposed in git!
+# Example: export TELEGRAM_BOT_TOKEN="your_token_here"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")

@@ -4,10 +4,9 @@ import sys
 import logging
 from app.esports_alert_bot import fetch_all_esports_markets, analyze_and_prepare_alerts
 
-# Set environment variables
-os.environ["DOME_API_KEY"] = "YOUR_DOME_API_KEY"
-os.environ["TELEGRAM_BOT_TOKEN"] = "YOUR_TELEGRAM_BOT_TOKEN"
-os.environ["TELEGRAM_CHAT_ID"] = "YOUR_TELEGRAM_CHAT_ID"
+# Get environment variables (set these in your environment or .env file)
+# Do NOT hardcode credentials here - they will be exposed in git!
+# Example: export DOME_API_KEY="your_key_here"
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
