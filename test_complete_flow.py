@@ -4,6 +4,13 @@ import sys
 import asyncio
 import logging
 
+# Try to load from .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Get environment variables (set these in your environment or .env file)
 # Do NOT hardcode credentials here - they will be exposed in git!
 # Example: export DOME_API_KEY="your_key_here"

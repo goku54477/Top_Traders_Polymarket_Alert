@@ -4,7 +4,7 @@ import schedule
 import time
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -16,11 +16,14 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "5"))
 VALUE_THRESHOLD = float(os.getenv("VALUE_THRESHOLD", "0.04"))  # 4% minimum true probability for value bets
 CACHE_TTL_MINUTES = int(os.getenv("CACHE_TTL_MINUTES", "10"))  # Cache markets for 10 minutes
+VOLUME_THRESHOLD = float(os.getenv("VOLUME_THRESHOLD", "100"))  # Minimum volume threshold (lowered to catch more markets)
+MAX_MARKET_AGE_DAYS = int(os.getenv("MAX_MARKET_AGE_DAYS", "7"))  # Skip markets older than this
 BASE_URL = "https://api.domeapi.io/v1"
 
 # Caching for markets and prices
 _markets_cache = {"data": None, "timestamp": None}
 _price_cache = {}  # {token_id: {"price": float, "timestamp": float}}
+_404_cache = set()  # Cache token_ids that returned 404 to avoid repeated failed fetches
 
 def get_headers():
     """Get authorization headers with current API key."""
@@ -120,9 +123,9 @@ def fetch_with_retry(url, params=None, retries=3, backoff_factor=0.5):
             
             # Handle different HTTP status codes appropriately
             if response.status_code == 404:
-                # 404 is expected for closed/invalid markets - log as DEBUG, not ERROR
-                logging.debug(f"Market not found (404): {url}")
-                return None
+                # 404 is expected for closed/invalid markets - log as INFO for price fetches
+                logging.info(f"Market not found (404): {url}")
+                return (None, 404)  # Return tuple with status code for 404 handling
             elif response.status_code == 429:
                 # Rate limited - use exponential backoff
                 _metrics["api_errors"] += 1
@@ -140,7 +143,7 @@ def fetch_with_retry(url, params=None, retries=3, backoff_factor=0.5):
                 continue
             
             response.raise_for_status()
-            return response.json()
+            return (response.json(), response.status_code)
             
         except requests.exceptions.Timeout as e:
             _metrics["api_errors"] += 1
@@ -155,7 +158,7 @@ def fetch_with_retry(url, params=None, retries=3, backoff_factor=0.5):
             if i < retries - 1:
                 time.sleep(backoff_factor * 2**i)
     
-    return None
+    return (None, None)  # Return tuple for consistency (None data, unknown status)
 
 
 def fetch_all_esports_markets():
@@ -179,8 +182,10 @@ def fetch_all_esports_markets():
     
     while True:
         url = f"{BASE_URL}/polymarket/markets"
+        # Don't filter by status in API - we'll filter ourselves
+        # API status field is unreliable (shows "open" but prices return 404)
         params = {"limit": limit, "offset": offset}
-        data = fetch_with_retry(url, params=params)
+        data, status_code = fetch_with_retry(url, params=params)
         
         if not data or "markets" not in data:
             logging.error(f"Failed to fetch markets at offset {offset}.")
@@ -214,9 +219,26 @@ def fetch_all_esports_markets():
             )
             
             # Check if it matches esports keywords
-            # First check slug patterns (more reliable)
+            # First check slug patterns (more reliable and inclusive)
             slug_is_esports = False
-            if slug_lower.startswith(("cs2-", "dota2-", "dota-", "lol-", "valorant-", "ow-", "rl-")):
+            # Expanded list of esports slug prefixes
+            slug_prefixes = (
+                "cs2-", "csgo-", "cs-", "counter-strike-",
+                "dota2-", "dota-",
+                "lol-", "league-",
+                "valorant-", "val-",
+                "ow-", "overwatch-",
+                "rl-", "rocket-league-",
+                "smash-", "smash-bros-",
+                "cod-", "call-of-duty-", "cdl-",
+                "apex-", "apex-legends-",
+                "fortnite-",
+                "pubg-",
+                "rainbow-", "r6-", "r6s-",
+                "fifa-", "fc-",
+                "f1-", "formula-1-",
+            )
+            if slug_lower.startswith(slug_prefixes):
                 slug_is_esports = True
             
             # Check for specific esports terms with word boundaries
@@ -276,8 +298,8 @@ def fetch_all_esports_markets():
             logging.warning("Reached safety limit of 1000 markets")
             break
         
-        # Small delay between API calls to avoid rate limiting
-        time.sleep(0.1)
+        # API requires 1 query per second - wait 1.1 seconds to be safe
+        time.sleep(1.1)
     
     # Update cache
     _markets_cache = {"data": all_markets, "timestamp": time.time()}
@@ -293,9 +315,14 @@ def fetch_all_esports_markets():
     return all_markets
 
 
-def fetch_price(token_id, platform="polymarket"):
+def fetch_price(token_id, platform="polymarket", market_slug=None, game_type=None):
     """Fetches the price for a given token ID with caching."""
     if not token_id:
+        return None
+    
+    # Check 404 cache first - skip markets that previously returned 404
+    if token_id in _404_cache:
+        logging.debug(f"Skipping token_id={token_id[:20]}... - previously returned 404")
         return None
     
     # Check price cache first
@@ -308,9 +335,29 @@ def fetch_price(token_id, platform="polymarket"):
     
     _metrics["cache_misses"] += 1
     url = f"{BASE_URL}/{platform}/market-price/{token_id}"
-    data = fetch_with_retry(url)
+    
+    # Log price fetch attempt with context
+    context_info = []
+    if game_type:
+        context_info.append(f"game={game_type}")
+    if market_slug:
+        context_info.append(f"slug={market_slug[:50]}")
+    context_str = f" ({', '.join(context_info)})" if context_info else ""
+    logging.debug(f"Fetching price for token_id={token_id[:20]}...{context_str}")
+    
+    data, status_code = fetch_with_retry(url)
     
     if data is None:
+        # If we got a 404, cache it to avoid repeated failed fetches
+        if status_code == 404:
+            _404_cache.add(token_id)
+            logging.debug(f"Cached 404 for token_id={token_id[:20]}...{context_str}")
+        
+        # Log failure with context - fetch_with_retry should have logged the specific error
+        # This warning provides context about which market failed
+        logging.warning(f"Price fetch failed for token_id={token_id[:20]}...{context_str} - Check logs above for specific error (404, 429, etc.)")
+        # Don't cache None immediately - let fetch_with_retry handle retries
+        # Only cache if we're confident it's a 404 (closed market)
         return None
     
     price = data.get("price") if data else None
@@ -325,8 +372,8 @@ def fetch_price(token_id, platform="polymarket"):
         except (ValueError, TypeError):
             return None
     
-    # Small delay to avoid rate limiting when fetching multiple prices
-    time.sleep(0.05)
+    # API requires 1 query per second - wait 1.1 seconds to be safe
+    time.sleep(1.1)
     
     return price
 
@@ -470,156 +517,254 @@ def analyze_and_prepare_alerts():
         
         if not yes_token_id or not no_token_id:
             continue
-            
-        poly_price = fetch_price(yes_token_id, "polymarket")
-        if poly_price is None:
+        
+        # Filter by market status - skip closed/resolved markets
+        market_status = market.get("status", "").upper()
+        if market_status in ["CLOSED", "RESOLVED", "CANCELLED"]:
+            logging.debug(f"Skipping {slug}: status={market_status}")
             continue
         
-        # Dome API uses 'volume_total' instead of 'volume'
-        volume = market.get("volume_total", 0)
-        if volume > 1000 and (poly_price < 0.05 or poly_price > 0.95):
-            # Determine which side to bet on
-            if poly_price < 0.05:
-                side = "YES"
-                side_label = side_a.get("label", "YES")
-                price_for_side = max(0.01, round(poly_price, 4))  # Ensure minimum 0.01, round to 4 decimals
-            else:  # poly_price > 0.95
-                side = "NO"
-                side_label = side_b.get("label", "NO")
-                price_for_side = max(0.01, round(1.0 - poly_price, 4))  # Ensure minimum 0.01, round to 4 decimals
-            
-            # Calculate percentage odds
-            percentage = round(price_for_side * 100, 2)
-            
-            # Calculate ROI
-            roi = calculate_roi(price_for_side)
-            multiplier = None
-            if roi is not None and roi > 0:
-                # Calculate multiplier: 1 + (ROI/100)
-                multiplier = round(1 + (roi / 100), 2)
-            
-            # Parse event information
-            event_info = format_event_info(market)
-            
-            # IMPORTANT: Verify slug matches the market data
-            # Use slug to determine game type if title parsing fails
-            slug_lower = slug.lower()
-            if not event_info["game_type"]:
-                # Try to determine game from slug
-                if slug_lower.startswith("lol-"):
-                    event_info["game_type"] = "League of Legends"
-                elif slug_lower.startswith("dota2-") or slug_lower.startswith("dota-"):
-                    event_info["game_type"] = "Dota 2"
-                elif slug_lower.startswith("cs2-"):
-                    event_info["game_type"] = "Counter-Strike"
-                elif slug_lower.startswith("valorant-"):
-                    event_info["game_type"] = "Valorant"
-            
-            # Build enhanced alert message (using HTML formatting for green color)
-            alert_parts = []
-            alert_parts.append("🎮 <b>ESPORTS VALUE BET ALERT</b>\n")
-            
-            # Match/Game information - use slug info if title parsing failed
-            if event_info["teams"]:
-                teams_str = f"{event_info['teams']['team_a']} vs {event_info['teams']['team_b']}"
-                if event_info["game_type"]:
-                    alert_parts.append(f"📅 <b>Match</b>: {event_info['game_type']} - {teams_str}")
+        # Check event timing - skip markets more than 2 days before event
+        # Also skip markets that have already ended or are too old
+        end_time_str = market.get("end_time")
+        if end_time_str:
+            try:
+                # Handle both string ISO format and Unix timestamp (int)
+                if isinstance(end_time_str, str):
+                    end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                elif isinstance(end_time_str, (int, float)):
+                    # Unix timestamp - convert to datetime
+                    end_time = datetime.fromtimestamp(end_time_str, tz=timezone.utc)
                 else:
-                    alert_parts.append(f"📅 <b>Match</b>: {teams_str}")
-            elif event_info["game_type"]:
-                alert_parts.append(f"📅 <b>Game</b>: {event_info['game_type']}")
-            
-            # Market information - use full title or parsed description
-            market_desc = event_info["full_title"]
-            if event_info["market_type"] and event_info["market_value"]:
-                market_desc = f"{event_info['market_type']} {event_info['market_value']}"
-            alert_parts.append(f"🎯 <b>Market</b>: {market_desc}")
-            
-            # Direct link to Polymarket - use slug format (was working for Dota)
-            # Keep the original slug format that was working
-            clean_slug = str(slug).strip()
-            
-            # Construct URL using slug format
-            polymarket_url = f"https://polymarket.com/event/{clean_slug}"
-            
-            alert_parts.append(f"🔗 <b>Trade</b>: <a href='{polymarket_url}'>Click here to trade</a>")
-            
-            # Bet recommendation
-            alert_parts.append(f"💰 <b>Bet</b>: <code>{side_label}</code> at <b>${price_for_side:.4f}</b> ({percentage}% odds)")
-            
-            # ROI calculation - show multiplier prominently (make it stand out)
-            if roi is not None and roi > 0 and multiplier:
-                # Use bold formatting and emojis to make it stand out (Telegram HTML doesn't support colors)
-                alert_parts.append(f"✅ ✅ <b>Potential Return: {multiplier}x</b> ✅ ✅\n💰 (Bet $1 to win ${multiplier:.2f}) 🚀")
-            
-            # Volume
-            alert_parts.append(f"📊 <b>Volume</b>: ${volume:,.0f}")
-            
-            # Direct link to Polymarket (already added above with slug)
-            # polymarket_url already added above
-            
-            # Analysis/insight - create varied, engaging messages based on price, volume, and market type
-            import random
-            import hashlib
-            
-            # Use slug-based seed to ensure variety but consistency per market
-            # This ensures different markets get different analysis, but same market gets same analysis
-            slug_hash = int(hashlib.md5(slug.encode()).hexdigest()[:8], 16)
-            random.seed(slug_hash)
-            
-            # Different analysis templates based on price range and volume
-            if price_for_side < 0.02:  # Very low odds (< 2%)
-                if volume > 50000:
-                    analysis_templates = [
-                        f"🔥 EXTREMELY undervalued! The market is pricing this at only {percentage}% - that's almost laughable given the context. With {multiplier}x returns, this is a potential goldmine if the market is wrong. Massive volume (${volume:,.0f}) suggests real money is moving here.",
-                        f"🚨 This is priced at {percentage}% but we're seeing serious value potential. The {multiplier}x multiplier suggests the market might be massively underestimating this outcome. High volume indicates trader interest.",
-                        f"⚡️ Massive value alert! Only {percentage}% odds but we see {multiplier}x return potential. This could be a huge opportunity - the numbers don't add up to such low probability.",
-                        f"💎 Hidden gem alert! Market shows {percentage}% chance but we're seeing {multiplier}x value. High volume means real traders are paying attention.",
-                    ]
-                else:
-                    analysis_templates = [
-                        f"💎 Hidden gem alert! Market shows {percentage}% chance but we're seeing {multiplier}x value. Low volume means this might be flying under the radar.",
-                        f"🎯 Undervalued opportunity at {percentage}% odds. The {multiplier}x return suggests significant upside if the market is wrong here.",
-                        f"🔍 Value bet detected! {percentage}% seems too low - {multiplier}x returns indicate the market might be mispricing this.",
-                        f"📊 Market mispricing alert! {percentage}% odds don't match the {multiplier}x payout potential. This looks like an opportunity.",
-                    ]
-            elif price_for_side < 0.05:  # Low odds (2-5%)
-                if volume > 50000:
-                    analysis_templates = [
-                        f"📊 Solid value play here! Market pricing at {percentage}% seems conservative given the context. {multiplier}x returns make this worth considering.",
-                        f"💰 Good value opportunity! {percentage}% odds look low compared to realistic probability. {multiplier}x multiplier suggests decent upside.",
-                        f"🎲 Interesting spot - market shows {percentage}% but we see {multiplier}x value. High volume indicates trader interest in this market.",
-                        f"📈 Value alert! {percentage}% probability seems off compared to the {multiplier}x return. High volume confirms this is worth watching.",
-                    ]
-                else:
-                    analysis_templates = [
-                        f"🔎 Value bet at {percentage}% odds. The {multiplier}x return suggests the market might be undervaluing this outcome.",
-                        f"⚖️ Market pricing seems off here - {percentage}% odds don't match the {multiplier}x return potential we're seeing.",
-                        f"📈 Decent value play! {percentage}% chance priced but {multiplier}x returns indicate possible upside.",
-                        f"🎯 Interesting opportunity at {percentage}% odds. {multiplier}x multiplier suggests the market might be wrong.",
-                    ]
-            else:  # High confidence (> 5%)
-                if volume > 50000:
-                    analysis_templates = [
-                        f"📈 High confidence play - market shows {percentage}% chance, making this a strong favorite. High volume confirms trader conviction.",
-                        f"✅ Strong favorite at {percentage}% odds. The numbers suggest this is a likely outcome worth considering, especially with {multiplier}x returns.",
-                        f"🎯 Market consensus points to {percentage}% probability here. High volume suggests strong support for this side.",
-                        f"💪 Clear favorite play! {percentage}% odds with {multiplier}x returns and high volume - this looks like the safe bet.",
-                    ]
-                else:
-                    analysis_templates = [
-                        f"📊 Market shows {percentage}% chance - solid favorite play. {multiplier}x returns make this worth a look.",
-                        f"💪 Strong positioning at {percentage}% odds. The numbers suggest this outcome is likely.",
-                        f"🎲 High probability play - {percentage}% odds with {multiplier}x returns present a reasonable opportunity.",
-                        f"⭐ Solid favorite at {percentage}% - market consensus favors this outcome with {multiplier}x returns.",
-                    ]
-            
-            insight = f"💡 <b>Analysis</b>: {random.choice(analysis_templates)}"
-            alert_parts.append(insight)
-            
-            alert_msg = "\n".join(alert_parts)
-            alerts.append(alert_msg)
-            last_alerted_slugs.add(slug)
+                    end_time = None
+                
+                if end_time:
+                    current_time = datetime.now(end_time.tzinfo)
+                    
+                    # Calculate time difference
+                    time_diff = end_time - current_time
+                    days_until_event = time_diff.days
+                    
+                    # Skip markets where event is more than 2 days in the future
+                    if days_until_event > 2:
+                        logging.debug(f"Skipping {slug}: event is {days_until_event} days away (more than 2 days)")
+                        continue
+                    
+                    # Skip markets that have already ended
+                    if current_time > end_time:
+                        logging.debug(f"Skipping {slug}: market already ended")
+                        continue
+                        
+                    # Skip markets that ended more than MAX_MARKET_AGE_DAYS ago
+                    if days_until_event < -MAX_MARKET_AGE_DAYS:
+                        logging.debug(f"Skipping {slug}: market ended {abs(days_until_event)} days ago")
+                        continue
+            except (ValueError, TypeError, OSError) as e:
+                logging.debug(f"Could not parse end_time for {slug}: {e}")
+        
+        # Parse event info early to get game type for logging
+        event_info = format_event_info(market)
+        game_type = event_info.get("game_type", "")
+        
+        # Fetch price with context for better error logging
+        poly_price = fetch_price(yes_token_id, "polymarket", market_slug=slug, game_type=game_type)
+        if poly_price is None:
+            # If price fetch failed (404), skip this market - it's likely closed/resolved
+            # This happens even when API shows status="open"
+            logging.debug(f"Skipping {slug}: price fetch failed (market likely closed)")
+            continue
+        
+        # Use volume_total, but fallback to volume_1_week if volume_total is 0
+        volume_total = market.get("volume_total", 0)
+        volume_1_week = market.get("volume_1_week", 0)
+        volume = volume_total if volume_total > 0 else volume_1_week
+        
+        # Log market details for debugging - use INFO level to see what's happening
+        price_str = f"{poly_price:.4f}" if poly_price else "N/A"
+        logging.info(f"Checking {slug} ({game_type}): volume=${volume:,.0f} (total=${volume_total:,.0f}, 1week=${volume_1_week:,.0f}), status={market_status}, price={price_str}")
+        
+        # Check volume threshold first, then price threshold
+        if volume <= VOLUME_THRESHOLD:
+            logging.debug(f"Skipping {slug}: volume ${volume:,.0f} below threshold ${VOLUME_THRESHOLD}")
+            continue
+        
+        # Perplexity logic: Skip extreme underdogs (< 5%), allow 5-95% range
+        if poly_price < 0.05 or poly_price > 0.95:
+            logging.debug(f"Skipping {slug}: price {poly_price:.4f} outside range (need 5-95%, skipping extreme odds)")
+            continue
+        
+        # Market qualifies! Generate alert
+        # Determine which side to bet on based on price (favor the undervalued side)
+        if poly_price < 0.50:  # Price favors "NO" side (< 50%), bet YES
+            side = "YES"
+            side_label = side_a.get("label", "YES")
+            price_for_side = max(0.01, round(poly_price, 4))  # Ensure minimum 0.01, round to 4 decimals
+        else:  # Price favors "YES" side (>= 50%), bet NO
+            side = "NO"
+            side_label = side_b.get("label", "NO")
+            price_for_side = max(0.01, round(1.0 - poly_price, 4))  # Ensure minimum 0.01, round to 4 decimals
+        
+        # Calculate percentage odds
+        percentage = round(price_for_side * 100, 2)
+        
+        # Calculate ROI
+        roi = calculate_roi(price_for_side)
+        multiplier = None
+        if roi is not None and roi > 0:
+            # Calculate multiplier: 1 + (ROI/100)
+            multiplier = round(1 + (roi / 100), 2)
+        
+        # IMPORTANT: Verify slug matches the market data
+        # Use slug to determine game type if title parsing failed
+        slug_lower = slug.lower()
+        if not event_info["game_type"]:
+            # Try to determine game from slug
+            if slug_lower.startswith("lol-"):
+                event_info["game_type"] = "League of Legends"
+            elif slug_lower.startswith("dota2-") or slug_lower.startswith("dota-"):
+                event_info["game_type"] = "Dota 2"
+            elif slug_lower.startswith("cs2-"):
+                event_info["game_type"] = "Counter-Strike"
+            elif slug_lower.startswith("valorant-"):
+                event_info["game_type"] = "Valorant"
+        
+        # Update game_type variable for consistency
+        game_type = event_info.get("game_type", "")
+        
+        # Build enhanced alert message (using HTML formatting for green color)
+        alert_parts = []
+        alert_parts.append("🎮 <b>ESPORTS VALUE BET ALERT</b>\n")
+        
+        # Match/Game information - use slug info if title parsing failed
+        if event_info["teams"]:
+            teams_str = f"{event_info['teams']['team_a']} vs {event_info['teams']['team_b']}"
+            if event_info["game_type"]:
+                alert_parts.append(f"📅 <b>Match</b>: {event_info['game_type']} - {teams_str}")
+            else:
+                alert_parts.append(f"📅 <b>Match</b>: {teams_str}")
+        elif event_info["game_type"]:
+            alert_parts.append(f"📅 <b>Game</b>: {event_info['game_type']}")
+        
+        # Market information - use full title or parsed description
+        market_desc = event_info["full_title"]
+        if event_info["market_type"] and event_info["market_value"]:
+            market_desc = f"{event_info['market_type']} {event_info['market_value']}"
+        alert_parts.append(f"🎯 <b>Market</b>: {market_desc}")
+        
+        # Direct link to Polymarket - try multiple URL formats
+        # Since both /event/{slug} and /market/{condition_id} are failing,
+        # we'll use search URL as primary (more reliable) and condition_id as secondary
+        clean_slug = str(slug).strip()
+        
+        # Get condition_id from market object (Polymarket API field)
+        condition_id = (
+            market.get("condition_id") or 
+            market.get("conditionId") or 
+            market.get("polymarket_condition_id")
+        )
+        
+        # Also check for direct URL fields that might be in the API response
+        polymarket_url_direct = (
+            market.get("polymarket_url") or 
+            market.get("url") or 
+            market.get("market_url")
+        )
+        
+        # Get market title for search
+        market_title = market.get("title", clean_slug)
+        
+        # Construct URL - try condition_id format first (direct link), then search as fallback
+        if polymarket_url_direct:
+            # Use direct URL if available
+            polymarket_url = polymarket_url_direct
+            logging.debug(f"Market URL using direct URL field: {polymarket_url}")
+        elif condition_id:
+            # Try condition_id format first - this is the most specific identifier
+            # Keep the 0x prefix as Polymarket might expect it
+            polymarket_url = f"https://polymarket.com/market/{condition_id}"
+            logging.debug(f"Market URL using condition_id: {polymarket_url} (slug: {clean_slug})")
+        else:
+            # Fallback to search URL if condition_id not available
+            import urllib.parse
+            search_query = urllib.parse.quote(market_title)
+            polymarket_url = f"https://polymarket.com/search?q={search_query}"
+            logging.warning(f"Market URL using search format (condition_id not found): {polymarket_url}")
+        
+        alert_parts.append(f"🔗 <b>Trade</b>: <a href='{polymarket_url}'>Click here to trade</a>")
+        
+        # Bet recommendation
+        alert_parts.append(f"💰 <b>Bet</b>: <code>{side_label}</code> at <b>${price_for_side:.4f}</b> ({percentage}% odds)")
+        
+        # ROI calculation - show multiplier prominently (make it stand out)
+        if roi is not None and roi > 0 and multiplier:
+            # Use bold formatting and emojis to make it stand out (Telegram HTML doesn't support colors)
+            alert_parts.append(f"✅ ✅ <b>Potential Return: {multiplier}x</b> ✅ ✅\n💰 (Bet $1 to win ${multiplier:.2f}) 🚀")
+        
+        # Volume
+        alert_parts.append(f"📊 <b>Volume</b>: ${volume:,.0f}")
+        
+        # Analysis/insight - create varied, engaging messages based on price, volume, and market type
+        import random
+        import hashlib
+        
+        # Use slug-based seed to ensure variety but consistency per market
+        # This ensures different markets get different analysis, but same market gets same analysis
+        slug_hash = int(hashlib.md5(slug.encode()).hexdigest()[:8], 16)
+        random.seed(slug_hash)
+        
+        # Different analysis templates based on price range and volume
+        if price_for_side < 0.02:  # Very low odds (< 2%)
+            if volume > 50000:
+                analysis_templates = [
+                    f"🔥 EXTREMELY undervalued opportunity! The market is pricing this at only {percentage}% - that's almost laughable given the context. With {multiplier}x returns, this is a potential goldmine if the market is wrong. Massive volume (${volume:,.0f}) suggests real money is moving here, indicating smart money sees value. <i>Why bet on lower odds? When the market undervalues true probability, even low-probability outcomes become profitable. If the true chance is higher than {percentage}%, betting at {multiplier}x odds creates positive expected value.</i>",
+                    f"🚨 This is priced at {percentage}% but we're seeing serious value potential. The {multiplier}x multiplier suggests the market might be massively underestimating this outcome. High volume indicates trader interest. <i>Value betting isn't about picking favorites - it's about finding when payouts exceed true probability. Here, {multiplier}x returns mean you profit if the true chance exceeds {round(100/multiplier, 1)}%, which we believe is the case.</i>",
+                    f"⚡️ Massive value alert! Only {percentage}% odds but we see {multiplier}x return potential. This could be a huge opportunity - the numbers don't add up to such low probability. <i>The market may be influenced by public bias or incomplete information. When true probability ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), the expected value is positive. Over many bets, this edge compounds into profit.</i>",
+                    f"💎 Hidden gem alert! Market shows {percentage}% chance but we're seeing {multiplier}x value. High volume means real traders are paying attention. <i>Lower market odds don't mean bad bets - they mean higher payouts when the market is wrong. If this outcome happens {round(100/multiplier, 1)}%+ of the time (which we estimate), betting at {percentage}% odds is profitable long-term.</i>",
+                ]
+            else:
+                analysis_templates = [
+                    f"💎 Hidden gem alert! Market shows {percentage}% chance but we're seeing {multiplier}x value. Low volume means this might be flying under the radar. <i>Why bet on lower odds? When the market undervalues the true probability, even modest odds can be profitable. Value betting isn't about favorites - it's about finding when the market undervalues probability. Here, {multiplier}x returns mean profit if true chance exceeds {round(100/multiplier, 1)}%.</i>",
+                    f"🎯 Undervalued opportunity at {percentage}% odds. The {multiplier}x return suggests significant upside if the market is wrong here. <i>Market odds reflect collective belief, not always true probability. When true probability ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), betting becomes profitable. Over time, these edges compound into consistent profits.</i>",
+                    f"🔍 Value bet detected! {percentage}% seems too low - {multiplier}x returns indicate the market might be mispricing this. <i>Lower market odds don't mean bad bets - they mean higher payouts when the market is wrong. If this outcome happens {round(100/multiplier, 1)}%+ of the time (which we estimate), betting at {percentage}% odds creates positive expected value long-term.</i>",
+                    f"📊 Market mispricing alert! {percentage}% odds don't match the {multiplier}x payout potential. This looks like an opportunity. <i>Value betting works by finding discrepancies between market odds and true probability. When true chance ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), the expected value is positive. This edge compounds over many bets.</i>",
+                ]
+        elif price_for_side < 0.05:  # Low odds (2-5%)
+            if volume > 50000:
+                analysis_templates = [
+                    f"📊 Solid value play here! Market pricing at {percentage}% seems conservative given the context. {multiplier}x returns make this worth considering. High volume (${volume:,.0f}) suggests real money sees value. <i>Why bet on lower odds? When the market undervalues true probability, even modest odds can be profitable. If the true chance is higher than {percentage}%, betting at {multiplier}x odds creates positive expected value. Over many bets, this edge compounds into profit.</i>",
+                    f"💰 Good value opportunity! {percentage}% odds look low compared to realistic probability. {multiplier}x multiplier suggests decent upside. High volume indicates trader interest. <i>The market may be underestimating this outcome - that's where value lies. Value betting isn't about picking favorites - it's about finding when payouts exceed true probability. Here, {multiplier}x returns mean you profit if true chance exceeds {round(100/multiplier, 1)}%.</i>",
+                    f"🎲 Interesting spot - market shows {percentage}% but we see {multiplier}x value. High volume indicates trader interest in this market. <i>Market odds reflect collective belief, not always true probability. When true probability ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), betting becomes profitable. Over time, these edges compound into consistent profits.</i>",
+                    f"📈 Value alert! {percentage}% probability seems off compared to the {multiplier}x return. High volume confirms this is worth watching. <i>Lower market odds don't mean bad bets - they mean higher payouts when the market is wrong. If this outcome happens {round(100/multiplier, 1)}%+ of the time (which we estimate), betting at {percentage}% odds is profitable long-term.</i>",
+                ]
+            else:
+                analysis_templates = [
+                    f"🔎 Value bet at {percentage}% odds. The {multiplier}x return suggests the market might be undervaluing this outcome. <i>Why bet on lower odds? When the market undervalues the true probability, even modest odds can be profitable. Value betting isn't about favorites - it's about finding when the market undervalues probability. Here, {multiplier}x returns mean profit if true chance exceeds {round(100/multiplier, 1)}%.</i>",
+                    f"⚖️ Market pricing seems off here - {percentage}% odds don't match the {multiplier}x return potential we're seeing. <i>Market odds reflect collective belief, not always true probability. When true probability ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), betting becomes profitable. Over time, these edges compound into consistent profits.</i>",
+                    f"📈 Decent value play! {percentage}% chance priced but {multiplier}x returns indicate possible upside. <i>Value betting isn't about favorites - it's about finding when the market undervalues probability. Lower market odds don't mean bad bets - they mean higher payouts when the market is wrong. If this outcome happens {round(100/multiplier, 1)}%+ of the time, betting at {percentage}% odds creates positive expected value.</i>",
+                    f"🎯 Interesting opportunity at {percentage}% odds. {multiplier}x multiplier suggests the market might be wrong. <i>The market may be influenced by public bias or incomplete information. When true probability ({round(100/multiplier, 1)}%+) exceeds market odds ({percentage}%), the expected value is positive. This edge compounds over many bets.</i>",
+                ]
+        else:  # High confidence (> 5%)
+            if volume > 50000:
+                analysis_templates = [
+                    f"📈 High confidence play - market shows {percentage}% chance, making this a strong favorite. High volume (${volume:,.0f}) confirms trader conviction. <i>Why bet on favorites? When market odds align with or underestimate true probability, favorites can offer value. With {multiplier}x returns, this represents a solid opportunity where the market recognizes the likely outcome, but we see additional edge in the pricing.</i>",
+                    f"✅ Strong favorite at {percentage}% odds. The numbers suggest this is a likely outcome worth considering, especially with {multiplier}x returns. High volume indicates market consensus. <i>Value betting includes favorites too - when true probability meets or exceeds market odds, even strong favorites can be profitable. Here, {percentage}% odds with {multiplier}x returns suggest the market is pricing this correctly or slightly undervaluing it.</i>",
+                    f"🎯 Market consensus points to {percentage}% probability here. High volume suggests strong support for this side. <i>High probability plays can still offer value when market odds align with true probability. With {multiplier}x returns, this represents a solid opportunity where the market recognizes the likely outcome, creating a safer but still profitable bet.</i>",
+                    f"💪 Clear favorite play! {percentage}% odds with {multiplier}x returns and high volume - this looks like the safe bet. <i>Value betting isn't just about underdogs - favorites can offer value too. When market odds ({percentage}%) align with or slightly underestimate true probability, betting becomes profitable. Over many bets, these consistent edges compound.</i>",
+                ]
+            else:
+                analysis_templates = [
+                    f"📊 Market shows {percentage}% chance - solid favorite play. {multiplier}x returns make this worth a look. <i>Why bet on favorites? When market odds align with true probability, even strong favorites can be profitable. Value betting includes favorites too - it's about finding when true probability meets or exceeds market odds. Here, {percentage}% odds with {multiplier}x returns suggest solid value.</i>",
+                    f"💪 Strong positioning at {percentage}% odds. The numbers suggest this outcome is likely. <i>High probability plays can still offer value when market odds align with true probability. With {multiplier}x returns, this represents a solid opportunity where the market recognizes the likely outcome, creating a safer but still profitable bet.</i>",
+                    f"🎲 High probability play - {percentage}% odds with {multiplier}x returns present a reasonable opportunity. <i>Value betting includes favorites too - when true probability meets or exceeds market odds, even strong favorites can be profitable. Over many bets, these consistent edges compound into profit.</i>",
+                    f"⭐ Solid favorite at {percentage}% - market consensus favors this outcome with {multiplier}x returns. <i>Value betting isn't just about underdogs - favorites can offer value too. When market odds ({percentage}%) align with or slightly underestimate true probability, betting becomes profitable long-term.</i>",
+                ]
+        
+        insight = f"💡 <b>Analysis</b>: {random.choice(analysis_templates)}"
+        alert_parts.append(insight)
+        
+        alert_msg = "\n".join(alert_parts)
+        alerts.append(alert_msg)
+        last_alerted_slugs.add(slug)
     
     _metrics["alerts_generated"] = len(alerts)
     return alerts
