@@ -1,227 +1,251 @@
 # Next Steps Plan - Esports Odds Alert Bot
 
-## ✅ Completed (Current Session)
+## 📅 Session Summary - November 2, 2025
 
-### Phase 1: ROI Calculations & Enhanced Alert Logic ✅
-- ✅ ROI calculation function implemented
-- ✅ Multiplier display (4.0x format) 
-- ✅ Removed ROI percentage from display
-- ✅ Enhanced analysis messages with variety
-- ✅ Potential Return highlighted with emojis
-- ✅ HTML parse mode for better formatting
+### ✅ Completed Today
 
-### Phase 4: API Stability & Performance (Partially Complete) ✅
-- ✅ Caching layer added (10 min TTL for markets, 1 min for prices)
-- ✅ Enhanced error handling (404s as DEBUG, 429 with exponential backoff)
-- ✅ Metrics tracking (API calls, cache hits/misses, errors)
-- ✅ Enhanced logging with cycle summaries
-- ✅ Rate limiting improvements (delays between calls)
-- ✅ Price cache cleanup (auto-expires old entries)
+1. **Enhanced Analysis Messages** ✅
+   - Added detailed value betting explanations
+   - Included expected value calculations
+   - Added probability threshold explanations
+   - Explained why betting on lower odds can be profitable
+   - Long-term profit reasoning included
 
-### Alert Improvements ✅
-- ✅ Separate alerts (one per message)
-- ✅ Analysis message variety (different templates based on price/volume)
-- ✅ Slug-based randomization for consistent variety per market
+2. **Hybrid Logic Implementation** ✅
+   - **Volume Threshold**: Kept at $100 (current)
+   - **Price Range**: Changed from `< 5% OR > 95%` to `> 5% AND < 95%` (Perplexity logic)
+   - **Event Timing Filter**: Added filter to skip markets more than 2 days before event
+   - **Market Status Filter**: Already implemented (CLOSED/RESOLVED/CANCELLED)
+   - **Market Recency Filter**: Already implemented (7 days max)
 
-### Current Status
-- ✅ Dota links working: `https://polymarket.com/event/{slug}`
-- ✅ LoL links fix implemented: Conditional URL logic with multiple fallback options
+3. **URL Link Fix Attempts** ⚠️
+   - Tried `/event/{slug}` format (404 errors)
+   - Tried `/market/{condition_id}` format (404 errors)
+   - Tried `/markets/{condition_id}` format (not tested)
+   - Tried removing 0x prefix from condition_id (not tested)
+   - All formats returning 404 errors despite markets being active
 
----
+4. **Documentation Created** ✅
+   - `COMPARISON_CHART.md` - Detailed comparison of our bot vs Perplexity logic
+   - `HYBRID_LOGIC_COMPARISON.md` - Hybrid approach analysis
+   - Multiple diagnostic scripts created for troubleshooting
 
-## ✅ Fix LoL Links (COMPLETED)
-
-### Issue
-LoL market links use the same format as Dota (`https://polymarket.com/event/{slug}`) but don't work. Dota links work fine.
-
-### Solution Implemented ✅
-Implemented conditional URL logic that:
-1. Checks for direct URL fields (`polymarket_url`, `url`, `market_url`)
-2. For LoL markets: tries `/market/{condition_id}` format first
-3. Falls back to `/market/{token_id}` if condition_id not available
-4. Final fallback to `/event/{slug}` format
-5. For Dota/other games: continues using `/event/{slug}` format (known to work)
-6. Added comprehensive logging for debugging URL construction
-
-### Investigation Steps
-
-1. **Compare Slug Formats**
-   - Check if LoL slugs have different structure than Dota slugs
-   - Dota example: `dota2-team-falcons-team-liquid-...`
-   - LoL example: `lol-t1-tes-2025-11-02-total-games-3pt5`
-   - Look for differences in formatting, encoding, or special characters
-
-2. **Test Different URL Formats**
-   - Try `/market/{condition_id}` format for LoL specifically
-   - Check if Polymarket uses different URL structure for LoL markets
-   - Verify if markets exist on Polymarket (may not be created yet)
-
-3. **Check API Response**
-   - Inspect full market object for LoL markets
-   - Look for `url`, `polymarket_url`, or `link` fields
-   - Check if `condition_id` format works for LoL: `/market/{condition_id}`
-
-4. **Potential Solutions**
-   - Use conditional URL format: Dota uses `/event/{slug}`, LoL uses `/market/{condition_id}`
-   - Or: Check if slug needs URL encoding
-   - Or: Markets may not exist yet on Polymarket (need to wait)
-
-### Implementation Approach
-```python
-# Pseudo-code for conditional URL format
-if game_type == "League of Legends":
-    if condition_id:
-        polymarket_url = f"https://polymarket.com/market/{condition_id}"
-    else:
-        polymarket_url = f"https://polymarket.com/event/{slug}"
-else:
-    polymarket_url = f"https://polymarket.com/event/{slug}"
-```
+5. **Code Saved to Branch** ✅
+   - Created branch: `link-fix-work`
+   - Commit: `a1c9d36` - "Save latest changes: Enhanced analysis, hybrid logic implementation, and link fix attempts"
+   - All changes preserved for comparison tomorrow
 
 ---
 
-## 📋 Remaining Phase 4 Tasks
+## 🚨 CRITICAL ISSUE: Polymarket Links Not Working
 
-### 1. Complete Rate Limiting (Partially Done)
-- ✅ Small delays between price API calls (0.05s)
-- ✅ Delay between market pagination (0.1s)
-- ⚠️ May need to adjust delays based on 429 error frequency
-- ⚠️ Consider implementing adaptive rate limiting
+### Problem
+All Polymarket links are returning 404 errors:
+- `/event/{slug}` format - 404 errors
+- `/market/{condition_id}` format - 404 errors  
+- Markets are confirmed active (user receiving alerts)
+- Dome API provides `condition_id` and `market_slug` but no direct URL fields
 
-### 2. Near-Miss Logging (Optional)
-- Log markets that meet volume but not price threshold
-- Useful for debugging and analysis
-- Track markets that were close but didn't trigger alerts
+### Failing Links Examples
+- `https://polymarket.com/event/lol-kcb-hrts-2025-11-02-game1` - 404
+- `https://polymarket.com/market/0x31e87a193b3096b3f8fd4c4ca3212cb4713d6909d19386cb674f8c2b2716a157` - 404
+- `https://polymarket.com/event/dota2-bb4-flc-2025-11-02-total-games-4pt5` - 404
 
-### 3. Performance Monitoring
-- Track slow operations (>1 second)
-- Monitor cache hit rates
-- Alert on high error rates (>10% API errors)
+### Root Cause Analysis Needed
+Possible issues:
+1. API ID mismatch - Dome API condition_id may not match Polymarket's internal ID
+2. URL structure change - Polymarket may have changed URL patterns
+3. Slug format difference - Dome API slug may differ from Polymarket's expected format
+4. Market creation delay - Markets exist in API before being live on Polymarket
+5. Market status - Markets might be private/unlisted
 
 ---
 
-## 🚀 Future Enhancements
+## 🎯 Tomorrow's Priority Tasks
 
-### Phase 5: Database & User Management (Deferred)
-- SQLite database for alert history
-- User preference storage
-- Alert history tracking across restarts
-- **Status**: Not needed currently, can add later
+### Priority 1: Fix Polymarket Links (CRITICAL)
 
-### Kalshi Integration
-- Add Kalshi market monitoring
-- Cross-platform price comparison
-- Arbitrage opportunity detection
-- **Status**: On hold until Polymarket is stable
+#### Investigation Steps
+1. **Manual Verification** ⚠️
+   - [ ] Manually open one failing market on Polymarket website
+   - [ ] Capture the actual working URL format from browser
+   - [ ] Compare with what bot is generating
+   - [ ] Document the difference
 
-### Additional Features
-- Telegram commands (start/stop alerts, preferences)
-- Market favorites/watchlist
-- Price change alerts (not just extremes)
-- Historical performance tracking
+2. **URL Format Testing** ⚠️
+   - [ ] Test `/market/{condition_id}` (with 0x prefix)
+   - [ ] Test `/market/{condition_id}` (without 0x prefix)
+   - [ ] Test `/markets/{condition_id}` (plural, with 0x)
+   - [ ] Test `/markets/{condition_id}` (plural, without 0x)
+   - [ ] Test `/event/{condition_id}` (condition_id instead of slug)
+   - [ ] Test search URLs: `/search?q={market_title}`
+
+3. **API Response Analysis** ⚠️
+   - [ ] Check all fields in Dome API response for URL-related data
+   - [ ] Verify if condition_id format matches Polymarket expectations
+   - [ ] Check if slug format matches Polymarket's expected format
+   - [ ] Look for any hidden URL fields or mappings
+
+4. **Historical Comparison** ⚠️
+   - [ ] Review previously working Dota link format
+   - [ ] Identify what changed
+   - [ ] Check if Polymarket URL structure changed
+
+#### Solutions to Try
+- **Option 1**: Search-based URLs (`/search?q={market_title}`)
+- **Option 2**: Condition ID format variations
+- **Option 3**: Manual URL verification from browser
+- **Option 4**: Check Dome API documentation
+- **Option 5**: Contact Dome API support for URL format guidance
+
+### Priority 2: Verify Hybrid Logic Implementation
+
+1. **Test Filter Changes** ⚠️
+   - [ ] Verify volume threshold ($100) is working
+   - [ ] Verify price range (5-95%) is catching mid-range markets
+   - [ ] Verify event timing filter (skip >2 days before) is working
+   - [ ] Test with LoL market that has $72k volume, 74.5% price (should qualify now)
+
+2. **Verify Analysis Messages** ⚠️
+   - [ ] Check that detailed analysis is appearing in alerts
+   - [ ] Verify value betting explanations are clear
+   - [ ] Confirm all alerts have proper formatting
+
+3. **Test Complete Flow** ⚠️
+   - [ ] Run full test cycle
+   - [ ] Verify alerts are generated correctly
+   - [ ] Check Telegram alert format
+   - [ ] Verify no errors in logs
+
+### Priority 3: Compare with Perplexity Logic
+
+Review `COMPARISON_CHART.md` and `HYBRID_LOGIC_COMPARISON.md`:
+- [ ] Decide if we should adopt more Perplexity filters
+- [ ] Consider adding liquidity type filter (ORDER BOOK vs AMM)
+- [ ] Consider adding settlement time filter (< 90 minutes)
+- [ ] Evaluate if volume threshold should be raised to $25k or $75k
+
+---
+
+## 📋 Current Implementation Status
+
+### Filters Currently Active
+- ✅ Volume threshold: $100 minimum
+- ✅ Price range: > 5% AND < 95% (changed from < 5% OR > 95%)
+- ✅ Event timing: Skip markets > 2 days before event
+- ✅ Market status: Skip CLOSED/RESOLVED/CANCELLED
+- ✅ Market recency: Skip markets older than 7 days
+- ❌ Liquidity type filter: Not implemented
+- ❌ Settlement time filter: Not implemented
+
+### Analysis Messages
+- ✅ Detailed value betting explanations
+- ✅ Expected value calculations included
+- ✅ Probability threshold explanations
+- ✅ Long-term profit reasoning
+- ✅ Clear explanations of why lower odds can be profitable
+
+### URL Generation
+- ⚠️ Currently using `/market/{condition_id}` format
+- ⚠️ All formats returning 404 errors
+- ⚠️ Need to find working format
 
 ---
 
 ## 🐛 Known Issues
 
-1. **LoL Links Not Working** (FIXED ✅)
-   - Previous: Using `/event/{slug}` format only
-   - Fixed: Implemented conditional URL logic with multiple fallback options
-   - Status: Ready for testing - will try `/market/{condition_id}` or `/market/{token_id}` for LoL markets
+1. **Polymarket Links Returning 404** (CRITICAL - Priority 1)
+   - Status: All URL formats failing
+   - Impact: Users cannot access markets from alerts
+   - Next Step: Manual verification and format testing
 
-2. **Analysis Variety** (FIXED)
-   - ✅ Now using slug-based randomization
-   - ✅ Different templates per price/volume range
-   - Status: Working correctly
+2. **Analysis Messages** (FIXED ✅)
+   - Status: Enhanced with detailed explanations
+   - Working correctly
 
----
-
-## 📝 Testing Checklist
-
-Before deploying:
-- [ ] Test Dota links (should work)
-- [ ] Test LoL links (fix implemented, needs verification)
-- [ ] Check logs to see which URL format is used for LoL markets
-- [ ] Verify alerts are sent separately
-- [ ] Check analysis messages vary between alerts
-- [ ] Monitor cache hit rates
-- [ ] Check error logs for 429/404 patterns
-- [ ] Verify metrics logging is working
+3. **Market Detection** (WORKING ✅)
+   - Status: All esports markets detected correctly
+   - LoL, Dota, CS markets all found
 
 ---
 
-## 🔐 Security Notes
+## 📁 Files Created Today
 
-- ✅ All API keys use environment variables
-- ✅ `.env` file in `.gitignore`
-- ✅ Test files cleaned of hardcoded keys
-- ✅ Repository is private
-- ⚠️ No keys should be in git history (already cleaned)
+### Documentation
+- `COMPARISON_CHART.md` - Our bot vs Perplexity logic comparison
+- `HYBRID_LOGIC_COMPARISON.md` - Hybrid approach analysis
+- `NEXT_STEPS_PLAN.md` - This file
 
----
-
-## 📊 Metrics to Monitor
-
-- **API Calls**: Should decrease with caching
-- **Cache Hit Rate**: Target >50% after first cycle
-- **Error Rate**: Should be <5%
-- **Alert Generation**: Track per cycle
-- **Cycle Time**: Should be faster with caching
+### Diagnostic Scripts
+- `diagnose_broken_links.py` - Check market fields for URL clues
+- `check_dome_api_urls.py` - Check API response for URL fields
+- `check_url_formats.py` - Test different URL formats
+- `test_lol_price_fetch.py` - Test LoL price fetching
+- `test_complete_flow.py` - Integration test script
 
 ---
 
-## 🎯 Immediate Next Steps
+## 🔄 Git Status
 
-1. **Test LoL Links Fix** (Priority 1)
-   - Run bot and test LoL market links
-   - Verify URLs work correctly
-   - Check logs to see which URL format is being used
+**Current Branch**: `link-fix-work`
+**Main Branch**: `main` (unchanged)
 
-2. **Test Complete Flow** (Priority 2)
-   - Run full test cycle
-   - Verify all features working
-   - Check Telegram alerts format
-
-3. **Complete Phase 4** (Priority 3)
-   - Finish remaining performance improvements
-   - Add near-miss logging if desired
-   - Optimize based on metrics
+**To compare tomorrow:**
+```bash
+git checkout main
+git diff main..link-fix-work
+git log main..link-fix-work
+```
 
 ---
 
-## 📚 Code Structure
+## 📝 Testing Checklist for Tomorrow
 
-### Key Files
-- `app/esports_alert_bot.py` - Main bot logic
-- `test_complete_flow.py` - Integration tests
-- `.env` - Environment variables (not in git)
-- `.gitignore` - Excludes .env and test files
+### Before Continuing Work
+- [ ] Switch to `link-fix-work` branch
+- [ ] Review changes made today
+- [ ] Understand current implementation
 
-### Key Functions
-- `fetch_all_esports_markets()` - Fetches and filters markets (with caching)
-- `fetch_price()` - Gets market price (with caching)
-- `analyze_and_prepare_alerts()` - Generates alerts with variety
-- `send_telegram_alerts()` - Sends one alert per message
-- `format_event_info()` - Parses market data for display
+### Link Fix Testing
+- [ ] Manually verify one failing market URL on Polymarket
+- [ ] Test all URL format variations
+- [ ] Document which format works
+- [ ] Implement working format
 
-### Configuration
-- `CACHE_TTL_MINUTES` - Market cache TTL (default: 10 min)
-- `VALUE_THRESHOLD` - Minimum ROI threshold (default: 0.04)
-- `POLL_INTERVAL_MIN` - Check interval (default: 5 min)
+### Filter Testing
+- [ ] Verify alerts are generated correctly
+- [ ] Check that mid-range prices (5-95%) qualify
+- [ ] Verify event timing filter works
+- [ ] Test with multiple markets
 
----
-
-## 💡 Tips for Debugging
-
-1. **Check Logs**: Look for "LoL market" log entries to see URL construction
-2. **Test URLs Manually**: Copy URLs from logs and test in browser
-3. **Compare Slugs**: Check if LoL slugs differ from Dota slugs
-4. **API Response**: Inspect full market object for URL fields
-5. **Telegram Links**: Ensure HTML formatting is correct for links
+### Analysis Testing
+- [ ] Verify detailed analysis appears in alerts
+- [ ] Check value betting explanations are clear
+- [ ] Confirm formatting is correct
 
 ---
 
-**Last Updated**: 2025-11-02
-**Status**: Phase 4 partially complete, LoL links fix implemented (ready for testing)
+## 🎯 Success Criteria
 
+### Link Fix
+- [ ] All Polymarket links in alerts work correctly
+- [ ] No 404 errors when clicking trade links
+- [ ] Links work for all game types (LoL, Dota, CS)
+- [ ] Solution is reliable and doesn't break with API changes
 
+### Filter Implementation
+- [ ] Alerts generated for markets with 5-95% price range
+- [ ] Event timing filter correctly skips markets >2 days away
+- [ ] Volume threshold ($100) working correctly
+- [ ] No false positives or missed opportunities
+
+### Analysis Quality
+- [ ] Analysis messages are detailed and educational
+- [ ] Users understand why betting on lower odds can be profitable
+- [ ] Expected value calculations are clear
+- [ ] Messages are not too long or overwhelming
+
+---
+
+**Last Updated**: 2025-11-02 23:50
+**Status**: Work saved to `link-fix-work` branch. Ready to continue tomorrow with link fix as Priority 1.
