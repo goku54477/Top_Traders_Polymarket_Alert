@@ -12,3 +12,4 @@ __pycache__/
 # Test files with credentials (optional - uncomment if you don't want test files tracked)
 # test_*.py
 # find_*.py
+# diagnose_*.py
