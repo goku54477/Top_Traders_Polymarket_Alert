@@ -545,9 +545,9 @@ def analyze_and_prepare_alerts():
                     time_diff = end_time - current_time
                     days_until_event = time_diff.days
                     
-                    # Skip markets where event is more than 2 days in the future
-                    if days_until_event > 2:
-                        logging.debug(f"Skipping {slug}: event is {days_until_event} days away (more than 2 days)")
+                    # Skip markets where event is more than 7 days in the future
+                    if days_until_event > 7:
+                        logging.debug(f"Skipping {slug}: event is {days_until_event} days away (more than 7 days)")
                         continue
                     
                     # Skip markets that have already ended
@@ -651,12 +651,11 @@ def analyze_and_prepare_alerts():
             market_desc = f"{event_info['market_type']} {event_info['market_value']}"
         alert_parts.append(f"🎯 <b>Market</b>: {market_desc}")
         
-        # Direct link to Polymarket - try multiple URL formats
-        # Since both /event/{slug} and /market/{condition_id} are failing,
-        # we'll use search URL as primary (more reliable) and condition_id as secondary
+        # Direct link to Polymarket - use game-specific URL formats
+        # Strategy: Try direct market URLs first, fall back to match/event page URLs
         clean_slug = str(slug).strip()
         
-        # Get condition_id from market object (Polymarket API field)
+        # Get IDs for direct market URL attempts
         condition_id = (
             market.get("condition_id") or 
             market.get("conditionId") or 
@@ -670,27 +669,54 @@ def analyze_and_prepare_alerts():
             market.get("market_url")
         )
         
-        # Get market title for search
-        market_title = market.get("title", clean_slug)
+        # Extract market name for enhanced context (Option 2 fallback)
+        market_name = event_info.get("market_type", "")
+        if event_info.get("market_value"):
+            market_name = f"{market_name} {event_info['market_value']}".strip()
+        if not market_name:
+            market_name = "this market"
         
-        # Construct URL - try condition_id format first (direct link), then search as fallback
+        # Construct URL - game-specific logic
         if polymarket_url_direct:
-            # Use direct URL if available
+            # Use direct URL if available from API
             polymarket_url = polymarket_url_direct
-            logging.debug(f"Market URL using direct URL field: {polymarket_url}")
-        elif condition_id:
-            # Try condition_id format first - this is the most specific identifier
-            # Keep the 0x prefix as Polymarket might expect it
-            polymarket_url = f"https://polymarket.com/market/{condition_id}"
-            logging.debug(f"Market URL using condition_id: {polymarket_url} (slug: {clean_slug})")
+            url_type = "direct_api_field"
+            logging.debug(f"Market URL using direct API field: {polymarket_url}")
+        elif game_type == "League of Legends":
+            # For LoL markets, use match page URL (Option 2)
+            # Direct market URLs with condition_id return 404 - confirmed by user testing
+            # Match page URL format: /sports/league-of-legends/games/week/1/{match-slug}
+            url_type = "match_page"
+            slug_parts = clean_slug.split("-")
+            match_slug = clean_slug
+            
+            # Find date pattern (YYYY-MM-DD) and extract up to that point
+            # Remove game-specific suffixes like -game1, -game3, -total-games-3pt5
+            for i, part in enumerate(slug_parts):
+                if len(part) == 4 and part.isdigit() and i + 2 < len(slug_parts):
+                    if slug_parts[i+1].isdigit() and slug_parts[i+2].isdigit():
+                        match_slug = "-".join(slug_parts[:i+3])
+                        break
+            
+            polymarket_url = f"https://polymarket.com/sports/league-of-legends/games/week/1/{match_slug}"
+            logging.debug(f"LoL market URL (match page): {polymarket_url} (from slug: {clean_slug})")
         else:
-            # Fallback to search URL if condition_id not available
-            import urllib.parse
-            search_query = urllib.parse.quote(market_title)
-            polymarket_url = f"https://polymarket.com/search?q={search_query}"
-            logging.warning(f"Market URL using search format (condition_id not found): {polymarket_url}")
+            # For Dota and other games, use /event/{slug} format (proven to work)
+            polymarket_url = f"https://polymarket.com/event/{clean_slug}"
+            url_type = "event_slug"
+            if game_type:
+                logging.debug(f"{game_type} market URL using slug: {polymarket_url}")
+            else:
+                logging.debug(f"Market URL using slug: {polymarket_url}")
         
-        alert_parts.append(f"🔗 <b>Trade</b>: <a href='{polymarket_url}'>Click here to trade</a>")
+        # Trade link with enhanced context for match page URLs (Option 2)
+        if game_type == "League of Legends":
+            # For LoL match page URLs, add context about which market to find
+            alert_parts.append(f"🔗 <b>Trade</b>: <a href='{polymarket_url}'>Click here to trade</a>")
+            alert_parts.append(f"📌 <i>Note: Link goes to match page. Look for '{market_name}' market below.</i>")
+        else:
+            # Standard trade link for other games
+            alert_parts.append(f"🔗 <b>Trade</b>: <a href='{polymarket_url}'>Click here to trade</a>")
         
         # Bet recommendation
         alert_parts.append(f"💰 <b>Bet</b>: <code>{side_label}</code> at <b>${price_for_side:.4f}</b> ({percentage}% odds)")
@@ -700,8 +726,12 @@ def analyze_and_prepare_alerts():
             # Use bold formatting and emojis to make it stand out (Telegram HTML doesn't support colors)
             alert_parts.append(f"✅ ✅ <b>Potential Return: {multiplier}x</b> ✅ ✅\n💰 (Bet $1 to win ${multiplier:.2f}) 🚀")
         
-        # Volume
-        alert_parts.append(f"📊 <b>Volume</b>: ${volume:,.0f}")
+        # Volume - show market-specific volume (not match total)
+        # Add note if using match page URL that shows total volume
+        if game_type == "League of Legends" and url_type == "match_page":
+            alert_parts.append(f"📊 <b>Market Volume</b>: ${volume:,.0f} <i>(Match page shows total volume for all markets)</i>")
+        else:
+            alert_parts.append(f"📊 <b>Volume</b>: ${volume:,.0f}")
         
         # Analysis/insight - create varied, engaging messages based on price, volume, and market type
         import random
@@ -792,6 +822,93 @@ async def send_telegram_alerts(bot, alerts):
             logging.exception(f"An unexpected error occurred sending alert {i}/{total_alerts}: {e}")
 
 
+def generate_daily_summary():
+    """Generate a daily summary of bot activity and market scanning."""
+    from collections import defaultdict
+    
+    # Fetch markets for summary
+    esports_markets = fetch_all_esports_markets()
+    
+    # Group by game type
+    games = defaultdict(list)
+    total_volume = 0
+    qualifying_markets = 0
+    VOLUME_THRESHOLD = float(os.getenv("VOLUME_THRESHOLD", "100"))
+    
+    for market in esports_markets:
+        event_info = format_event_info(market)
+        game_type = event_info.get("game_type") or "Unknown"
+        games[game_type].append(market)
+        
+        volume_total = market.get("volume_total", 0)
+        volume_1_week = market.get("volume_1_week", 0)
+        volume = volume_total if volume_total > 0 else volume_1_week
+        total_volume += volume
+        
+        if volume >= VOLUME_THRESHOLD:
+            qualifying_markets += 1
+    
+    # Build summary message
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    time_of_day = "Morning" if datetime.now().hour < 12 else "Evening"
+    
+    summary_parts = []
+    summary_parts.append(f"🤖 <b>ESPORTS BOT DAILY {time_of_day.upper()} SUMMARY</b>")
+    summary_parts.append(f"📅 {current_time}")
+    summary_parts.append("")
+    summary_parts.append("📊 <b>Scanning Activity (24/7)</b>")
+    summary_parts.append(f"✅ Bot is actively scanning markets")
+    summary_parts.append(f"🌐 Total esports markets detected: <b>{len(esports_markets)}</b>")
+    summary_parts.append(f"💰 Markets with volume ≥${VOLUME_THRESHOLD:.0f}: <b>{qualifying_markets}</b>")
+    summary_parts.append(f"💵 Total volume across all markets: <b>${total_volume:,.0f}</b>")
+    summary_parts.append("")
+    
+    if games:
+        summary_parts.append("🎮 <b>Esports Breakdown:</b>")
+        for game_name in sorted(games.keys(), key=lambda x: x or ""):
+            markets_list = games[game_name]
+            game_volume = sum(
+                max(m.get("volume_total", 0), m.get("volume_1_week", 0))
+                for m in markets_list
+            )
+            qualifying = sum(
+                1 for m in markets_list
+                if max(m.get("volume_total", 0), m.get("volume_1_week", 0)) >= VOLUME_THRESHOLD
+            )
+            
+            icon = "✅" if qualifying > 0 else "⏳"
+            summary_parts.append(f"{icon} <b>{game_name}</b>: {len(markets_list)} markets (${game_volume:,.0f} vol)")
+        
+        summary_parts.append("")
+    
+    summary_parts.append("📈 <b>Bot Status:</b>")
+    summary_parts.append("✅ Market detection: Active")
+    summary_parts.append("✅ Alert generation: Active")
+    summary_parts.append("✅ 24/7 monitoring: Enabled")
+    summary_parts.append("")
+    summary_parts.append("💡 <i>Alerts are sent automatically when value opportunities are detected!</i>")
+    
+    return "\n".join(summary_parts)
+
+
+async def send_daily_summary(bot):
+    """Send daily summary to Telegram."""
+    try:
+        summary = generate_daily_summary()
+        await bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode=ParseMode.HTML)
+        logging.info("Successfully sent daily summary to Telegram.")
+    except TelegramError as e:
+        logging.exception(f"Failed to send daily summary: {e}")
+    except Exception as e:
+        logging.exception(f"Error generating daily summary: {e}")
+
+
+def run_summary_job_sync():
+    """Synchronous wrapper to run the async summary job."""
+    bot = Bot(token=BOT_TOKEN)
+    asyncio.run(send_daily_summary(bot))
+
+
 async def job():
     """The main job to be run on a schedule."""
     cycle_start = time.time()
@@ -850,8 +967,16 @@ if __name__ == "__main__":
     else:
         logging.info("Starting Esports Odds Alert Bot...")
         run_job_sync()
+        
+        # Schedule regular alert checks
         schedule.every(POLL_INTERVAL_MIN).minutes.do(run_job_sync)
-        logging.info(f"Scheduled to run every {POLL_INTERVAL_MIN} minutes.")
+        logging.info(f"Scheduled alert checks to run every {POLL_INTERVAL_MIN} minutes.")
+        
+        # Schedule daily summaries (twice per day - morning and evening)
+        schedule.every().day.at("09:00").do(run_summary_job_sync)
+        schedule.every().day.at("21:00").do(run_summary_job_sync)
+        logging.info("Scheduled daily summaries at 09:00 and 21:00 UTC.")
+        
         try:
             while True:
                 schedule.run_pending()

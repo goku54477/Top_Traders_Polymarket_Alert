@@ -9,7 +9,19 @@ __pycache__/
 .env.local
 .env.*.local
 
-# Test files with credentials (optional - uncomment if you don't want test files tracked)
-# test_*.py
-# find_*.py
-# diagnose_*.py
+# Test and diagnostic scripts (now organized in scripts/)
+scripts/tests/
+scripts/diagnostics/
+
+# Individual test/diagnostic patterns (backup - in case files are in root)
+test_*.py
+find_*.py
+diagnose_*.py
+check_*.py
+compare_*.py
+analyze_*.py
+investigate_*.py
+
+# Test output files
+*.log
+*.txt.bak
