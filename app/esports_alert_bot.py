@@ -122,6 +122,7 @@ NON_ESPORTS_KEYWORDS = [
     "golf", "soccer", "football", "basketball", "baseball",
     "hockey", "cricket", "rugby", "marathon", "breeders cup",
     "college football", "cfb", "ncaa", "horse racing", "kentucky derby",
+    "ucl", "uefa", "champions league", "europa league", "premier league", "la liga", "bundesliga", "serie a", "ligue 1",
     "preakness", "belmont", "nascar", "indycar", "motorsport",
     # Politics - Expanded list
     "trump", "biden", "political", "election", "president", "congress",
@@ -936,8 +937,8 @@ def analyze_and_prepare_alerts():
             price_str = f"{poly_price:.4f}" if poly_price else "N/A"
             logging.info(f"Checking {slug} ({game_type}): volume=${volume:,.0f} (total=${volume_total:,.0f}, 1week=${volume_1_week:,.0f}), status={market_status}, price={price_str}")
         
-        # Check volume threshold first, then price threshold
-        if volume <= VOLUME_THRESHOLD:
+        # STRICT volume threshold check - must be strictly greater than threshold
+        if volume < VOLUME_THRESHOLD:
             logging.debug(f"Skipping {slug}: volume ${volume:,.0f} below threshold ${VOLUME_THRESHOLD}")
             continue
         
@@ -1265,11 +1266,49 @@ def analyze_and_prepare_alerts():
             alert_parts.append(insight)
             
             alert_msg = "\n".join(alert_parts)
-            alerts.append(alert_msg)
+            
+            # Calculate alert score for ranking (higher is better)
+            # Score = (ROI * 100) + (volume / 1000) + (value indicator)
+            # This prioritizes high ROI, high volume, and good value bets
+            alert_score = 0.0
+            
+            # ROI component (most important for value)
+            if roi is not None and roi > 0:
+                alert_score += roi * 10  # Multiply ROI by 10 for better scaling
+            
+            # Volume component (higher volume = more liquid = better)
+            alert_score += volume / 100.0  # Divide by 100 to scale volume
+            
+            # Value indicator: lower price for better value (if price < 0.5, bet YES; if price > 0.5, bet NO)
+            # The further from 0.5, the more value (but we already filter 5-95% range)
+            value_component = abs(price_for_side - 0.5) * 2  # Max 1.0 when price is 0.05 or 0.95
+            alert_score += value_component * 5
+            
+            # Store alert with its score
+            alerts.append({
+                "message": alert_msg,
+                "score": alert_score,
+                "roi": roi if roi is not None else 0,
+                "volume": volume,
+                "slug": slug
+            })
             last_alerted_slugs.add(slug)
     
-    _metrics["alerts_generated"] = len(alerts)
-    return alerts
+    # Rank alerts by score (highest first) and select top 5
+    alerts.sort(key=lambda x: x["score"], reverse=True)
+    top_alerts = alerts[:5]
+    
+    # Extract just the messages for the top 5
+    final_alerts = [alert["message"] for alert in top_alerts]
+    
+    if len(alerts) > 5:
+        logging.info(f"📊 Generated {len(alerts)} alerts, selecting top {len(final_alerts)} by value score")
+        logging.info(f"   Top alerts: {[alert['slug'] for alert in top_alerts]}")
+    else:
+        logging.info(f"📊 Generated {len(alerts)} alerts")
+    
+    _metrics["alerts_generated"] = len(final_alerts)
+    return final_alerts
 
 
 async def send_telegram_alerts(bot, alerts):
