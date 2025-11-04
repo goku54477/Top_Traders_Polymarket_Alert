@@ -1632,21 +1632,7 @@ if __name__ == "__main__":
         logging.warning("⚠️ Telegram chat validation failed, but continuing anyway.")
         logging.warning("⚠️ Bot will attempt to send alerts - if this fails, check your TELEGRAM_CHAT_ID and bot permissions.")
     else:
-        # Send startup message only after successful validation
-        async def send_startup_message():
-            """Send a one-time startup message to Telegram."""
-            bot = Bot(token=BOT_TOKEN)
-            try:
-                startup_message = "🤖 <b>Esports Odds Bot Started</b>\n\n✅ Bot is online and monitoring for value betting opportunities!"
-                await send_telegram_message_with_retry(bot, startup_message, parse_mode=ParseMode.HTML)
-                logging.info("✅ Startup message sent to Telegram.")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to send startup message (non-critical): {e}")
-            finally:
-                await bot.close()
-        
-        # Send startup message once
-        asyncio.run(send_startup_message())
+        logging.info("✅ Telegram chat validated successfully - ready to send alerts")
     
     logging.info("Starting Esports Odds Alert Bot...")
     run_job_sync()
