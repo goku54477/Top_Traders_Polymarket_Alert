@@ -1545,16 +1545,11 @@ async def validate_telegram_chat():
             await bot.close()
             return False
         
-        # Send a test message to confirm we can send (using retry helper)
-        test_message = "🤖 <b>Esports Odds Bot Started</b>\n\n✅ Bot is online and monitoring for value betting opportunities!"
-        if await send_telegram_message_with_retry(bot, test_message, parse_mode=ParseMode.HTML):
-            logging.info("✅ Test message sent successfully to Telegram chat.")
-            await bot.close()
-            return True
-        else:
-            logging.error("❌ Failed to send test message to Telegram chat.")
-            await bot.close()
-            return False
+        # Validation successful - don't send startup message here to avoid spam on restarts
+        # The startup message will be sent only once when the bot actually starts processing
+        logging.info("✅ Telegram chat validation successful - ready to send alerts")
+        await bot.close()
+        return True
     except Exception as e:
         logging.exception(f"❌ Failed to validate Telegram chat: {e}")
         return False
@@ -1611,6 +1606,22 @@ if __name__ == "__main__":
     if not asyncio.run(validate_telegram_chat()):
         logging.error("❌ Telegram chat validation failed. Please fix the configuration before starting the bot.")
         exit(1)
+    
+    # Send startup message only once after successful validation
+    async def send_startup_message():
+        """Send a one-time startup message to Telegram."""
+        bot = Bot(token=BOT_TOKEN)
+        try:
+            startup_message = "🤖 <b>Esports Odds Bot Started</b>\n\n✅ Bot is online and monitoring for value betting opportunities!"
+            await send_telegram_message_with_retry(bot, startup_message, parse_mode=ParseMode.HTML)
+            logging.info("✅ Startup message sent to Telegram.")
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to send startup message (non-critical): {e}")
+        finally:
+            await bot.close()
+    
+    # Send startup message once
+    asyncio.run(send_startup_message())
     
     logging.info("Starting Esports Odds Alert Bot...")
     run_job_sync()
