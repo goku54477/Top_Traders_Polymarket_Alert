@@ -1677,11 +1677,12 @@ if __name__ == "__main__":
         logging.info("✅ Telegram chat validated successfully - ready to send alerts")
     
     logging.info("Starting Esports Odds Alert Bot...")
-    run_job_sync()
     
     # Schedule regular alert checks - every 8 hours (3 times per day)
+    # First run will be 8 hours from now, or schedule to start at specific times
     schedule.every(8).hours.do(run_job_sync)
     logging.info(f"Scheduled alert checks to run every 8 hours (3 times per day).")
+    logging.info(f"First alert cycle will run in 8 hours. Bot is now monitoring in background.")
     
     # Schedule daily summaries (twice per day - morning and evening)
     schedule.every().day.at("09:00").do(run_summary_job_sync)
