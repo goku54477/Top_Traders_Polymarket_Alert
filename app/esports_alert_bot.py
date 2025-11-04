@@ -1495,7 +1495,9 @@ async def send_telegram_message_with_retry(bot, text, parse_mode=None):
 
 
 async def validate_telegram_chat():
-    """Validate that the bot can send messages to the configured Telegram chat."""
+    """Validate that the bot can send messages to the configured Telegram chat.
+    Returns True if successful, False otherwise. Does not raise exceptions."""
+    bot = None
     try:
         # Log the raw chat ID for debugging
         raw_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -1513,7 +1515,7 @@ async def validate_telegram_chat():
         logging.info(f"   Int chat_id: {chat_id_int} (type: {type(chat_id_int)})")
         logging.info(f"   String chat_id: '{chat_id_str}' (type: {type(chat_id_str)}, length: {len(chat_id_str)})")
         
-        # Try to get chat info to validate the chat ID (try both formats)
+        # Try to get chat info to validate the chat ID (try both formats with timeout)
         chat_validated = False
         chat_title = "Unknown"
         
@@ -1521,11 +1523,15 @@ async def validate_telegram_chat():
             if chat_id_to_try is None:
                 continue
             try:
-                chat = await bot.get_chat(chat_id=chat_id_to_try)
+                # Add timeout to prevent hanging
+                chat = await asyncio.wait_for(bot.get_chat(chat_id=chat_id_to_try), timeout=10.0)
                 chat_title = chat.title if hasattr(chat, 'title') and chat.title else 'Chat ID'
                 logging.info(f"✅ Telegram chat validated successfully: {chat_title} (using {type(chat_id_to_try).__name__}: {chat_id_to_try})")
                 chat_validated = True
                 break
+            except asyncio.TimeoutError:
+                logging.warning(f"   Timeout validating chat with {type(chat_id_to_try).__name__} - trying next format...")
+                continue
             except BadRequest:
                 # Try next format
                 continue
@@ -1537,21 +1543,39 @@ async def validate_telegram_chat():
             logging.error(f"❌ Telegram Chat Validation Failed: Could not validate chat with either format")
             logging.error(f"   Int chat_id tried: {chat_id_int}")
             logging.error(f"   String chat_id tried: '{chat_id_str}'")
-            logging.error(f"   Please verify:")
-            logging.error(f"   1. The TELEGRAM_CHAT_ID is correct: '{chat_id_str}'")
-            logging.error(f"   2. The bot has been added to the group/channel")
-            logging.error(f"   3. For groups: The bot has permission to send messages")
-            logging.error(f"   4. For channels: The bot is added as an administrator")
-            await bot.close()
+            logging.error(f"   This may be a temporary network issue. Bot will continue but alerts may fail.")
+            if bot:
+                try:
+                    await bot.close()
+                except:
+                    pass
             return False
         
         # Validation successful - don't send startup message here to avoid spam on restarts
         # The startup message will be sent only once when the bot actually starts processing
         logging.info("✅ Telegram chat validation successful - ready to send alerts")
-        await bot.close()
+        if bot:
+            try:
+                await bot.close()
+            except:
+                pass
         return True
+    except asyncio.TimeoutError:
+        logging.warning("⚠️ Validation timed out - this may be a temporary network issue")
+        if bot:
+            try:
+                await bot.close()
+            except:
+                pass
+        return False
     except Exception as e:
-        logging.exception(f"❌ Failed to validate Telegram chat: {e}")
+        logging.warning(f"⚠️ Failed to validate Telegram chat (non-critical): {e}")
+        logging.warning(f"   Bot will continue - validation errors may be temporary network issues")
+        if bot:
+            try:
+                await bot.close()
+            except:
+                pass
         return False
 
 
@@ -1601,27 +1625,28 @@ if __name__ == "__main__":
     
     logging.info("✅ All environment variables validated successfully")
     
-    # Validate Telegram chat before starting
+    # Validate Telegram chat before starting (non-blocking - don't exit on failure)
     logging.info("Validating Telegram chat connection...")
-    if not asyncio.run(validate_telegram_chat()):
-        logging.error("❌ Telegram chat validation failed. Please fix the configuration before starting the bot.")
-        exit(1)
-    
-    # Send startup message only once after successful validation
-    async def send_startup_message():
-        """Send a one-time startup message to Telegram."""
-        bot = Bot(token=BOT_TOKEN)
-        try:
-            startup_message = "🤖 <b>Esports Odds Bot Started</b>\n\n✅ Bot is online and monitoring for value betting opportunities!"
-            await send_telegram_message_with_retry(bot, startup_message, parse_mode=ParseMode.HTML)
-            logging.info("✅ Startup message sent to Telegram.")
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to send startup message (non-critical): {e}")
-        finally:
-            await bot.close()
-    
-    # Send startup message once
-    asyncio.run(send_startup_message())
+    validation_result = asyncio.run(validate_telegram_chat())
+    if not validation_result:
+        logging.warning("⚠️ Telegram chat validation failed, but continuing anyway.")
+        logging.warning("⚠️ Bot will attempt to send alerts - if this fails, check your TELEGRAM_CHAT_ID and bot permissions.")
+    else:
+        # Send startup message only after successful validation
+        async def send_startup_message():
+            """Send a one-time startup message to Telegram."""
+            bot = Bot(token=BOT_TOKEN)
+            try:
+                startup_message = "🤖 <b>Esports Odds Bot Started</b>\n\n✅ Bot is online and monitoring for value betting opportunities!"
+                await send_telegram_message_with_retry(bot, startup_message, parse_mode=ParseMode.HTML)
+                logging.info("✅ Startup message sent to Telegram.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to send startup message (non-critical): {e}")
+            finally:
+                await bot.close()
+        
+        # Send startup message once
+        asyncio.run(send_startup_message())
     
     logging.info("Starting Esports Odds Alert Bot...")
     run_job_sync()
