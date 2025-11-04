@@ -1294,18 +1294,21 @@ def analyze_and_prepare_alerts():
             })
             last_alerted_slugs.add(slug)
     
-    # Rank alerts by score (highest first) and select top 5
+    # Rank alerts by score (highest first) and select top 5 (3-5 max per cycle)
     alerts.sort(key=lambda x: x["score"], reverse=True)
-    top_alerts = alerts[:5]
+    # Select up to 5 alerts, but send all if fewer are found
+    top_alerts = alerts[:min(5, len(alerts))]
     
-    # Extract just the messages for the top 5
+    # Extract just the messages for the selected alerts
     final_alerts = [alert["message"] for alert in top_alerts]
     
     if len(alerts) > 5:
-        logging.info(f"📊 Generated {len(alerts)} alerts, selecting top {len(final_alerts)} by value score")
+        logging.info(f"📊 Generated {len(alerts)} alerts, selecting top {len(final_alerts)} by value score (3-5 max per cycle)")
         logging.info(f"   Top alerts: {[alert['slug'] for alert in top_alerts]}")
+    elif len(alerts) > 0:
+        logging.info(f"📊 Generated {len(alerts)} alerts, sending all {len(final_alerts)} (3-5 max per cycle)")
     else:
-        logging.info(f"📊 Generated {len(alerts)} alerts")
+        logging.info(f"📊 No alerts generated")
     
     _metrics["alerts_generated"] = len(final_alerts)
     return final_alerts
@@ -1676,9 +1679,9 @@ if __name__ == "__main__":
     logging.info("Starting Esports Odds Alert Bot...")
     run_job_sync()
     
-    # Schedule regular alert checks
-    schedule.every(POLL_INTERVAL_MIN).minutes.do(run_job_sync)
-    logging.info(f"Scheduled alert checks to run every {POLL_INTERVAL_MIN} minutes.")
+    # Schedule regular alert checks - every 8 hours (3 times per day)
+    schedule.every(8).hours.do(run_job_sync)
+    logging.info(f"Scheduled alert checks to run every 8 hours (3 times per day).")
     
     # Schedule daily summaries (twice per day - morning and evening)
     schedule.every().day.at("09:00").do(run_summary_job_sync)
