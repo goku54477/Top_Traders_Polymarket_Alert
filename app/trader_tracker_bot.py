@@ -45,9 +45,21 @@ def get_chat_id_for_telegram():
         return None, str(CHAT_ID)
 
 # Trader configuration - list of traders to track
-TRADERS = [
-    {"username": "Sharky6999", "wallet": "0x751a2b86cab503496efd325c8344e10159349ea1"}
-]
+# Can be configured via environment variable TRADER_WALLETS (comma-separated wallet:username pairs)
+# Or set directly here (wallet addresses are public, but usernames can be customized)
+TRADER_WALLETS_ENV = os.getenv("TRADER_WALLETS", "")
+if TRADER_WALLETS_ENV:
+    # Parse from environment: "wallet1:username1,wallet2:username2"
+    TRADERS = []
+    for pair in TRADER_WALLETS_ENV.split(","):
+        if ":" in pair:
+            wallet, username = pair.strip().split(":", 1)
+            TRADERS.append({"username": username.strip(), "wallet": wallet.strip()})
+else:
+    # Default trader (example - replace with your own)
+    TRADERS = [
+        {"username": "Sharky6999", "wallet": "0x751a2b86cab503496efd325c8344e10159349ea1"}
+    ]
 
 BASE_URL = "https://api.domeapi.io/v1"  # Still used for market volume
 POLYMARKET_API_URL = "https://data-api.polymarket.com"

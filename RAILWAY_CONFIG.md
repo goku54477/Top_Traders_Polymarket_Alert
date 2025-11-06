@@ -6,17 +6,17 @@ Update these environment variables in your Railway dashboard:
 
 ### 1. DOME_API_KEY
 ```
-bf29312e-2fdd-478f-b3eb-cf117b9f8b94
+your_dome_api_key_here
 ```
 
 ### 2. TELEGRAM_BOT_TOKEN
 ```
-8292495956:AAHt2g7zQucKAaGZrygtTZ_5Cq8tPpxp43Q
+your_telegram_bot_token_here
 ```
 
 ### 3. TELEGRAM_CHAT_ID ⚠️ **IMPORTANT - FIX THIS!**
 ```
--1002697342092
+your_telegram_chat_id_here
 ```
 **Note:** Make sure this is exactly `-1002697342092` (with the `2` at the end)
 
