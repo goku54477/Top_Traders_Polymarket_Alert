@@ -172,6 +172,26 @@ def parse_position(position_data, trader_username):
         event_slug = position_data.get("eventSlug", "")
         event_id = position_data.get("eventId", "")
         
+        # Try to derive the latest entry timestamp from multiple possible fields
+        possible_ts_keys = [
+            "latestTradeTxTimestamp",
+            "latestTradeTimestamp",
+            "lastTradeTimestamp",
+            "lastTradedAt",
+            "lastTradeAt",
+            "updatedAt",
+            "createdAt",
+            "timestamp"
+        ]
+        
+        entry_timestamp = 0
+        for k in possible_ts_keys:
+            ts = position_data.get(k)
+            entry_timestamp = parse_any_timestamp(ts)
+            if entry_timestamp:
+                logging.debug(f"Found timestamp from field '{k}': {entry_timestamp}")
+                break
+        
         return {
             "trader": trader_username,
             "condition_id": condition_id,
@@ -188,6 +208,7 @@ def parse_position(position_data, trader_username):
             "initial_value": initial_value,  # Entry cost (what they paid)
             "cash_pnl": cash_pnl,  # Profit/loss in dollars
             "percent_pnl": percent_pnl,  # Profit/loss percentage
+            "entry_timestamp": entry_timestamp,  # When they entered the position
             "raw_data": position_data  # Keep raw data for debugging
         }
     except Exception as e:
@@ -246,6 +267,31 @@ def build_polymarket_url(position_data):
         base_slug = re.sub(pattern, "", base_slug)
     
     return f"https://polymarket.com/event/{base_slug}"
+
+def parse_any_timestamp(value):
+    """Parse numeric (seconds or ms) or ISO8601 timestamp into epoch seconds (UTC)."""
+    if value is None or value == "":
+        return 0
+    try:
+        # Numeric input (int/float or numeric string)
+        if isinstance(value, (int, float)):
+            v = int(value)
+        elif isinstance(value, str) and value.strip().replace('.', '', 1).isdigit():
+            v = int(float(value.strip()))
+        else:
+            # ISO8601 string, possibly with 'Z'
+            s = str(value).strip()
+            s = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            return int(dt.timestamp())
+        
+        # Handle milliseconds vs seconds
+        # If it's unrealistically large (>= year 33658), assume ms and convert to seconds
+        if v > 10**12:
+            v //= 1000
+        return v if v > 0 else 0
+    except Exception:
+        return 0
 
 def format_timestamp_utc(timestamp):
     """Convert Unix timestamp to human-readable UTC format."""
@@ -352,8 +398,8 @@ def generate_trader_alerts(all_positions):
     if not all_positions:
         return []
     
-    # Sort by current value (descending) and take top 5
-    sorted_positions = sorted(all_positions, key=lambda x: x["current_value"], reverse=True)
+    # Sort by entry timestamp (descending - newest first) and take top 5
+    sorted_positions = sorted(all_positions, key=lambda x: x["entry_timestamp"], reverse=True)
     top_positions = sorted_positions[:5]
     
     alerts = []
@@ -362,6 +408,11 @@ def generate_trader_alerts(all_positions):
         alert_parts.append(f"🐋 <b>TOP TRADER ALERT</b> #{i}\n")
         alert_parts.append(f"👤 <b>Trader</b>: {pos['trader']}")
         alert_parts.append(f"📊 <b>Market</b>: {pos['market_title']}")
+        
+        # Show entry date/time
+        if pos.get('entry_timestamp'):
+            entry_time = format_timestamp_utc(pos['entry_timestamp'])
+            alert_parts.append(f"🕐 <b>Entry Time</b>: {entry_time}")
         
         # Fetch and display total market volume
         market_volume = fetch_market_volume(pos['market_slug'])
@@ -477,6 +528,9 @@ async def trader_tracking_job():
     logging.info("Starting trader tracking cycle...")
     
     all_positions = []
+    current_time = time.time()
+    time_threshold = 72 * 60 * 60  # 72 hours in seconds
+    value_threshold = 300  # Minimum $300 USD
     
     # Fetch positions for all traders
     for trader in TRADERS:
@@ -488,20 +542,42 @@ async def trader_tracking_job():
             
             for position_data in positions:
                 parsed_position = parse_position(position_data, username)
-                if parsed_position and parsed_position["current_value"] > 0:
-                    # Create unique key for tracking (use condition_id or asset)
-                    position_key = f"{wallet}_{parsed_position.get('condition_id') or parsed_position.get('asset')}_{parsed_position.get('market_slug')}"
-                    if position_key not in _last_alerted_positions:
-                        all_positions.append(parsed_position)
-                        _last_alerted_positions.add(position_key)
+                if not parsed_position:
+                    continue
+                
+                # Require a valid entry timestamp to enforce freshness
+                entry_timestamp = parsed_position.get('entry_timestamp', 0)
+                if entry_timestamp <= 0:
+                    logging.debug(f"Skipping position (no timestamp): {parsed_position.get('market_title', '')[:50]}...")
+                    continue
+                
+                # Filter by time threshold (≤ 72 hours old)
+                time_diff = current_time - entry_timestamp
+                if time_diff > time_threshold:
+                    logging.debug(f"Skipping position (older than 72h): {parsed_position['market_title'][:50]}...")
+                    continue
+                
+                # Filter by minimum value threshold ($300)
+                if parsed_position.get("current_value", 0) < value_threshold:
+                    logging.debug(f"Skipping position (below $300): {parsed_position['market_title'][:50]}... (${parsed_position.get('current_value', 0):.2f})")
+                    continue
+                
+                # Create unique key for tracking (use condition_id or asset)
+                position_key = f"{wallet}_{parsed_position.get('condition_id') or parsed_position.get('asset')}_{parsed_position.get('market_slug')}"
+                if position_key not in _last_alerted_positions:
+                    all_positions.append(parsed_position)
+                    _last_alerted_positions.add(position_key)
+                    logging.info(f"Added position: {parsed_position['market_title'][:50]}... (${parsed_position['current_value']:.2f})")
         except Exception as e:
             logging.exception(f"Error fetching positions for {username}: {e}")
     
     if not all_positions:
-        logging.info("No new positions found.")
+        logging.info("No new positions found matching criteria (72h window, min $300).")
         return
     
-    # Generate alerts for top 5 positions by current value
+    logging.info(f"Found {len(all_positions)} positions matching criteria")
+    
+    # Generate alerts for top 5 positions by entry timestamp (newest first)
     alerts = generate_trader_alerts(all_positions)
     
     if alerts:
